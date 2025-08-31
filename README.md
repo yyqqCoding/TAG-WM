@@ -5,7 +5,6 @@
 [![GitHub Stars](https://img.shields.io/github/stars/Suchenl/TAG-WM?style=social)](https://github.com/Suchenl/TAG-WM)
 
 Official implementation of **TAG-WM**, a tamper-aware watermarking framework for diffusion-generated images.  
-*Code release coming soon.*
 
 ---
 
