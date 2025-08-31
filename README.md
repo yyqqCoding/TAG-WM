@@ -35,6 +35,37 @@ modelscope download --model AI-ModelScope/stable-diffusion-2-1-base
 hf download stabilityai/stable-diffusion-2-1-base
 ```
 
+### 📦 Data & Models
+
+Please download the required files from the following links:
+
+#### 🔗 Download Links
+
+- **Pre-trained Models**: [Hugging Face](https://huggingface.co/Suchenl/TAG-WM/tree/main)
+- **Dataset**:
+  - [Stable-Diffusion-Prompts](https://huggingface.co/datasets/Gustavosta/Stable-Diffusion-Prompts)
+  - [SOIM (For logo insertion)](https://drive.google.com/file/d/1enOkjrVBJRUJesLERZ3obYe7hlZpLWSb/view)
+
+#### 📁 File Structure Setup
+
+After downloading, please place the files in the following directory structure:
+
+```
+TAG-WM/
+├── DVRD/
+│   └── checkpoints/
+│       ├── model.pt                  # ← Place downloaded model here
+│       └── trainsize-512_epochnum-100_totalstep-33400.pt
+├── datasets/
+│   └── your_dataset/                  # ← Extract dataset here
+│       ├── images/
+│       ├── annotations/
+│       └── README.md
+├── src/
+├── configs/
+└── README.md
+```
+
 ### Test model's ability
 ```bash
 python -m applied_to_sd2.test --model_path "SD_model_path" --start_sample_idx 0 --num 1000 --random_crop_ratio 0.3 --return_tamper_loc True --calc_wm_use_tamper_loc True
