@@ -42,6 +42,7 @@ Please download the required files from the following links:
 #### 🔗 Download Links
 
 - **Pre-trained Models**: [Hugging Face](https://huggingface.co/Suchenl/TAG-WM/tree/main)
+  - [Existing model weights](https://huggingface.co/Suchenl/TAG-WM/blob/main/DVRD/checkpoints/trainsize-512_epochnum-100_totalstep-33400.pt)
 - **Dataset**:
   - [Stable-Diffusion-Prompts](https://huggingface.co/datasets/Gustavosta/Stable-Diffusion-Prompts)
   - [SOIM (For logo insertion)](https://drive.google.com/file/d/1enOkjrVBJRUJesLERZ3obYe7hlZpLWSb/view)
@@ -53,16 +54,12 @@ After downloading, please place the files in the following directory structure:
 ```
 TAG-WM/
 ├── DVRD/
-│   └── checkpoints/
-│       ├── model.pt                  # ← Place downloaded model here
-│       └── trainsize-512_epochnum-100_totalstep-33400.pt
-├── datasets/
-│   └── your_dataset/                  # ← Extract dataset here
-│       ├── images/
-│       ├── annotations/
-│       └── README.md
-├── src/
-├── configs/
+│   └── checkpoints/   # ↓ Place downloaded model here
+│       └── trainsize-512_epochnum-100_totalstep-33400.pt  
+├── datasets/          # ↓ Extract dataset here
+│   ├── Gustavosta/                 
+│   │   └── Stable-Diffusion-Prompts
+│   └── SOIM
 └── README.md
 ```
 
