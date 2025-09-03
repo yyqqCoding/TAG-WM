@@ -470,8 +470,8 @@ if __name__ == '__main__':
     parser.add_argument('--guidance_scale', default=7.5, type=float)
     parser.add_argument('--num_inference_steps', default=50, type=int)
     parser.add_argument('--num_inversion_steps', default=10, type=int)
-    parser.add_argument('--dataset_path', default='datasets/Gustavosta/Stable-Diffusion-Prompts')
-    parser.add_argument('--model_path', default='/public/chenyuzhuo/MODELS/Stability-AI/stablediffusion/models/Stable-Diffusion-2-1-base')
+    parser.add_argument('--dataset_path', default='./datasets/Gustavosta/Stable-Diffusion-Prompts')
+    parser.add_argument('--model_path', default='/media/wang003/liyongqing/TAG/cache/models--stabilityai--stable-diffusion-2-base')
     parser.add_argument('--calc_wm_use_tamper_loc', default=False, type=bool)
 
     # for tamper localization
