@@ -22,6 +22,12 @@ class ModifiedStableDiffusionPipelineOutput(BaseOutput):
 
 
 class ModifiedStableDiffusionPipeline(StableDiffusionPipeline):
+    """
+    扩展的 Stable Diffusion 管线：
+    - 保持原生推理流程不变；
+    - 在去噪循环中可选地按掩码在潜变量上注入“幅度-符号”扰动作为简单水印基线；
+    - 暴露 decode_image 等辅助方法，便于潜/图像空间互转与可视化。
+    """
     def __init__(self,
         vae,
         text_encoder,
@@ -170,6 +176,7 @@ class ModifiedStableDiffusionPipeline(StableDiffusionPipeline):
             for i, t in enumerate(timesteps):
                 # add watermark
                 if watermarking_mask is not None:
+                    # 在潜变量上注入简单“幅度-符号”水印扰动，受 watermarking_mask 控制
                     # latents[watermarking_mask] += watermarking_delta
                     latents[watermarking_mask] += watermarking_delta * torch.sign(latents[watermarking_mask])
 

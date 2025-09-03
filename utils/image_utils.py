@@ -1,3 +1,9 @@
+"""
+图像与潜空间工具集：
+- 种子设定、图像预处理/后处理、潜变量与图像互转；
+- 常见失真/篡改模拟（JPEG、logo 覆盖、随机裁剪、随机抹除、缩放、模糊、噪声、亮度、平移），
+  可选择返回对应的图像空间真值掩码（tamper_loc）。
+"""
 import torch
 import numpy as np
 from torchvision import transforms
@@ -6,6 +12,7 @@ import random
 from tampers.logo_putting.logo_putting import *
 
 def set_random_seed(seed=0):
+    """统一设置相关随机库的种子，确保可复现。"""
     torch.manual_seed(seed + 0)
     torch.cuda.manual_seed(seed + 1)
     torch.cuda.manual_seed_all(seed + 2)
@@ -15,6 +22,9 @@ def set_random_seed(seed=0):
 
 
 def transform_img(image, target_size=512):
+    """
+    将 PIL.Image 归一化到 Stable Diffusion 所需张量格式：[-1,1]，并裁切到正方形尺寸。
+    """
     tform = transforms.Compose(
         [
             transforms.Resize(target_size),
@@ -27,6 +37,7 @@ def transform_img(image, target_size=512):
 
 
 def latents_to_imgs(pipe, latents):
+    """使用管线的 VAE 解码潜变量，并转为 PIL 列表。"""
     x = pipe.decode_image(latents)
     x = pipe.torch_to_numpy(x)
     x = pipe.numpy_to_pil(x)
@@ -34,6 +45,17 @@ def latents_to_imgs(pipe, latents):
 
 
 def image_distortion(img, seed, args):
+    """
+    对输入图像按 args 指定的失真/篡改方案进行处理：
+    - jpeg_ratio：JPEG 压缩；
+    - logo_putting_num/logo_ratio/logo_data_path：覆盖 logo 并生成掩码（使用 tampers.logo_putting.Logo）；
+    - random_crop_ratio：用裁剪-黑色填充方式模拟裁切篡改；
+    - random_drop_ratio：随机矩形抹除；
+    - resize_ratio / blur / noise / 亮度 / 平移 等。
+    返回：
+    - 若 args.return_tamper_loc=True，返回 (处理后 PIL 图像, 图像空间掩码 ndarray[H,W,3])；
+    - 否则仅返回处理后 PIL 图像。
+    """
     tamper_loc = None
     if args.jpeg_ratio is not None:
         img.save(f"tmp_{args.jpeg_ratio}.jpg", quality=args.jpeg_ratio)
@@ -156,6 +178,9 @@ def image_distortion(img, seed, args):
 
 
 def measure_similarity(images, prompt, model, clip_preprocess, tokenizer, device):
+    """
+    计算 CLIP 相似度（图像-文本平均相似度），用于质量/一致性度量。
+    """
     with torch.no_grad():
         img_batch = [clip_preprocess(i).unsqueeze(0) for i in images]
         img_batch = torch.concatenate(img_batch).to(device)

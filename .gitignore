@@ -1,2 +1,4 @@
 DVRD/checkpoints/*
 datasets/*
+/datasets/
+/DVRD/checkpoints/

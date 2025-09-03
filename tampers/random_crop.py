@@ -1,9 +1,15 @@
+"""
+随机裁剪篡改生成：
+- 将图像随机裁剪后，粘贴回原尺寸画布（黑/白/噪声/翻转等可选填充），形成“裁剪篡改”。
+- 同时生成二值掩码：非裁剪区域为 0，裁剪区域外的填充为 1（或按项目约定）。
+"""
 import os
 import cv2
 import numpy as np
 import random
 
 def random_crop(image, crop_ratio):
+    """按比例随机裁剪，返回裁片及其在原图中的位置与尺寸。"""
     h, w, _ = image.shape
     new_h, new_w = int(h * crop_ratio), int(w * crop_ratio)
     top = random.randint(0, h - new_h)
@@ -12,6 +18,7 @@ def random_crop(image, crop_ratio):
     return crop, top, left, new_h, new_w
 
 def apply_padding(image, crop, h, w, top, left, new_h, new_w, method):
+    """将裁片贴回到空画布（指定填充方式），得到篡改后的图像。"""
     padded_image = np.zeros((h, w, 3), dtype=np.uint8)
     if method == 'white':
         padded_image.fill(255)
@@ -25,11 +32,13 @@ def apply_padding(image, crop, h, w, top, left, new_h, new_w, method):
     return padded_image
 
 def create_mask(h, w, top, left, new_h, new_w):
+    """生成二值掩码：被原始内容覆盖处为 0；其余为 1（即填充区域）。"""
     mask = np.ones((h, w), dtype=np.uint8) * 255
     mask[top:top + new_h, left:left + new_w] = 0
     return mask
 
 def process_images(input_path, img_output_path, mask_output_path, crop_ratios, padding_methods):
+    """批量处理目录中的图像，输出篡改图与对应掩码。"""
     num = 0
     for ratio in crop_ratios:
         ratio_img_path = os.path.join(img_output_path, str(ratio))

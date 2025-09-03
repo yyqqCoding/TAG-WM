@@ -1,3 +1,22 @@
+"""
+端到端评测脚本（applied_to_sd2/test.py）
+
+功能概述：
+- 构建可反演的 Stable Diffusion 管线；
+- 生成带版权水印/定位模板的图像；
+- 对图像施加可选失真/篡改并生成真值掩码；
+- 将图像编码并做 DDIM 正向推进，反解潜空间中的水印与定位模板；
+- 计算水印与定位相关指标（以及可选的 CLIP 分数与噪声相似度）；
+- 输出图像、掩码与 CSV 汇总文件。
+
+使用说明（关键 CLI 参数示例）：
+- --model_path, --scheduler：加载 SD 模型与调度器（DDIM/PNDM/UniPC/...）。
+- --wm_len, --center_interval_ratio, --shuffle_random_seed, --encrypt_random_seed：水印设计相关。
+- --tlt_intervals_num, --optimize_tamper_loc_method, --DVRD_checkpoint_path：定位细化相关。
+- --img_h, --img_w, --num_inference_steps, --num_inversion_steps：生成与反演步数/尺寸。
+- --logo_putting_num/random_crop_ratio 等：失真/篡改开关，--return_tamper_loc 返回真值掩码。
+- --output_path：结果目录，自动创建 images、distorted_images、pred_tamper_loc_images 等子目录。
+"""
 import argparse
 import copy
 # from email.policy import default
@@ -19,6 +38,14 @@ from metrics.calc_tl_metrics import *
 from metrics.calc_tpr_metrics import *
 
 def main(args):
+    """
+    端到端主流程：
+    1) 根据配置选择调度器与加载可反演 SD 管线；
+    2) 构造水印/定位模板嵌入器 WatermarkEmbedder；
+    3) 遍历数据集：生成图像 -> 施加失真/获取真值 -> 反演潜变量 -> 反解水印与定位模板；
+    4) 统计水印准确率、定位指标、CLIP 分数与噪声相似度，并写入 CSV；
+    5) 保存生成图、失真图、预测/真值掩码等产物。
+    """
     device = args.device
     # Choose the scheduler
     if args.scheduler == 'DDIM':
@@ -31,6 +58,7 @@ def main(args):
         scheduler = DEISMultistepScheduler.from_pretrained(args.model_path, subfolder='scheduler')
     elif args.scheduler == 'DPMSolver':
         scheduler = DPMSolverMultistepScheduler.from_pretrained(args.model_path, subfolder='scheduler')
+    # 1) 构造可反演的 SD 管线（不使用安全审查器），半精度推理以节省显存
     # Load pipe
     pipe = InversableStableDiffusionPipeline.from_pretrained(
             args.model_path,
@@ -41,6 +69,7 @@ def main(args):
     pipe.safety_checker = None
     pipe = pipe.to(device)
 
+    # 可选：加载参考 CLIP 模型用于图文一致性评估
     #reference model for CLIP Score
     if args.reference_model is not None:
         ref_model, _, ref_clip_preprocess = open_clip.create_model_and_transforms(args.reference_model,
@@ -48,9 +77,11 @@ def main(args):
                                                                                   device=device)
         ref_tokenizer = open_clip.get_tokenizer(args.reference_model)
 
+    # 数据集与提示词入口（get_dataset 由外部 utils/数据集构造）
     # dataset
     dataset, prompt_key = get_dataset(args)
 
+    # 2) 构造水印与定位模板嵌入器（支持 ChaCha20 加密、打乱、以及 DVRD 定位细化）
     # method of embedding watermark
     wm_tlt_embedder = WatermarkEmbedder(wm_len=args.wm_len,
                                         center_interval_ratio=args.center_interval_ratio,
@@ -64,13 +95,16 @@ def main(args):
                                         DVRD_train_size=args.DVRD_train_size,
                                         device=device)
 
+    # 结果目录与 CSV 汇总文件
     # create output directory
     os.makedirs(args.output_path, exist_ok=True)
 
+    # 检测阶段假设不知道原始 prompt（使用空串）
     # assume at the detection time, the original prompt is unknown
     tester_prompt = ''
     text_embeddings = pipe.get_text_embedding(tester_prompt)
 
+    # CSV 文件：基础指标、篡改定位、图像空间定位详细指标
     # Write infos to csv
     save_basic_info_path = os.path.join(args.output_path, "images_basic_infos.csv")
     # if not os.path.exists(save_basic_info_path):
@@ -92,6 +126,7 @@ def main(args):
         csv_writer3 = csv.writer(csv_file)
         csv_writer3.writerow(["Image Name", 'Distortion Type', 'Accuracy', 'Precision', 'Specificity', 'Recall', 'AUC', 'IoU', 'Dice'])
             
+    # 累积指标容器
     # wm_accs
     wm_accs = []
     wm_global_accs = []
@@ -127,6 +162,7 @@ def main(args):
     }
     #test
     sample_idx = args.start_sample_idx
+    # 3) 主循环：按数据项生成 -> 失真/真值 -> 反演 -> 反解 -> 统计与保存
     for i in tqdm(range(args.start_sample_idx, args.start_sample_idx + args.num)):
         seed = i + args.gen_seed
         current_prompt = dataset[i][prompt_key]
@@ -134,6 +170,7 @@ def main(args):
         # generate the watermark(wm) and the tamper localization template(tlt)
         set_random_seed(seed)
 
+        # 生成随机比特水印；TLT 采用奇偶间隔（可替换为其他模板生成方式）
         wm = torch.randint(0, 2, [args.wm_len], requires_grad=False, device=device)
         # wm = torch.ones([args.wm_len], requires_grad=False, device=device).int()
         
@@ -145,6 +182,7 @@ def main(args):
         # embedding
         start_record_sample = 20
         if i >= start_record_sample:
+            # 计时：嵌入 -> 采样噪声生成 -> 推理
             tic = time.time()
             init_latents_w, wm_repeat = wm_tlt_embedder.embedding_wm_tlt(wm, tlt, latent_size=args.latent_size)
             toc = time.time()
@@ -174,6 +212,7 @@ def main(args):
             print(f'sample_time_cost time: {sample_time_cost} seconds')
             sample_time_costs.append(sample_time_cost)
         else:
+            # 前若干张不计时，流程一致
             init_latents_w, wm_repeat = wm_tlt_embedder.embedding_wm_tlt(wm, tlt, latent_size=args.latent_size)
             outputs = pipe(
                 current_prompt,
@@ -189,6 +228,7 @@ def main(args):
         image_w = outputs.images[0]
 
         ### Save the generated image
+        # 保存生成图像
         file_name = f"sample_{sample_idx:09d}.png"
         sample_idx += 1
         image_path = os.path.join(args.output_path, 'images', file_name)
@@ -198,6 +238,7 @@ def main(args):
         
         ## distortion
         if args.return_tamper_loc:
+            # 对图像施加指定篡改与失真，并返回图像空间真值掩码
             image_w_distortion, true_tamper_loc_img = image_distortion(image_w, seed, args)
             pil_true_tamper_loc_img = Image.fromarray(true_tamper_loc_img * 255)
             true_tamper_loc_img = torch.from_numpy(true_tamper_loc_img).to(device).permute(2, 0, 1)
@@ -209,15 +250,18 @@ def main(args):
             pil_true_tamper_loc_img.save(true_tamper_loc_img_path)
                    
         else:
+            # 仅失真，不返回真值掩码
             image_w_distortion = image_distortion(image_w, seed, args)
             true_tamper_loc_img = true_tamper_loc_latent = None
             
+        # 保存失真图
         # save distorted image
         distorted_image_path = os.path.join(args.output_path, 'distorted_images', file_name)
         os.makedirs(os.path.join(args.output_path, 'distorted_images'), exist_ok=True)
         image_w_distortion.save(distorted_image_path)
          
         # reverse img
+        # 4) 编码并正向 DDIM 推进获取反演潜变量
         image_w_distortion = transform_img(image_w_distortion, target_size=(args.img_h, args.img_w)).unsqueeze(0).to(text_embeddings.dtype).to(device)
         image_latents_w = pipe.get_image_latents(image_w_distortion, sample=False)
         if i >= start_record_sample:
@@ -242,6 +286,7 @@ def main(args):
             )
 
         ### ----------------  deembedding ----------------  ###
+        # 5) 反解水印与 TLT：反打乱 -> 反采样 -> 解密 -> 多数投票
         reversed_wm_repeat, reversed_tlt = wm_tlt_embedder.deembedding_wm_tlt(reversed_latents_w)
         pred_tamper_loc_latent = wm_tlt_embedder.get_tamper_loc_latent(tlt=tlt, 
                                                                        reversed_tlt=reversed_tlt, 
@@ -261,6 +306,7 @@ def main(args):
         #                                              with_tamper_loc=args.calc_wm_use_tamper_loc)
         ### Calculate metrics
         # # Watermark acc
+        # 水印位级准确率与全局重复匹配率
         wm_acc = wm_tlt_embedder.eval_watermark(wm=wm, reversed_wm=reversed_wm)
         wm_accs.append(wm_acc)
         wm_global_acc = (reversed_wm_repeat == wm_repeat).float().mean().item()
@@ -277,10 +323,12 @@ def main(args):
         clip_scores.append(clip_socre)
 
         # noise similarity metric
+        # 初始嵌入噪声与反演噪声的余弦相似度，用于反演质量参考
         noise_sim = torch.cosine_similarity(init_latents_w[0].view(-1), reversed_latents_w[0].view(-1), dim=0).item()
         noise_sims.append(noise_sim)
 
         ##### ------------------------------------------- Tamper Localization ------------------------------------------- #####
+        # 6) 将潜空间定位图解码到图像空间，用于可视化与指标计算
         # pred_tamper_loc_img = wm_tlt_embedder.trans_tamper_loc_latent2img(pipe, true_tamper_loc_latent, binaryize_thre=args.binaryize_thre) # test true
         pred_tamper_loc_img = wm_tlt_embedder.trans_tamper_loc_latent2img(pipe, pred_tamper_loc_latent, binaryize_thre=args.binaryize_thre)
         # pred_tamper_loc_img = wm_tlt_embedder.optimize_tamper_loc(pred_tamper_loc_img, tamper_confidence=args.tamper_confidence) # optimize
@@ -289,12 +337,14 @@ def main(args):
         pil_pred_tamper_loc_img = Image.fromarray(pil_pred_tamper_loc_img)
         
         # save pred tamper loc imgs
+        # 保存预测定位掩码（图像空间）
         pred_tamper_loc_img_savedir = os.path.join(args.output_path, 'pred_tamper_loc_images')
         os.makedirs(pred_tamper_loc_img_savedir, exist_ok=True)
         pred_tamper_loc_img_path = os.path.join(pred_tamper_loc_img_savedir, file_name)
         pil_pred_tamper_loc_img.save(pred_tamper_loc_img_path)
 
         # Tamper Localization Acc
+        # 7) 计算图像/潜空间的定位准确率与全局比例误差
         # in image space
         img_localize_acc, img_spatial_localize_acc, img_absolute_detect_error, img_calc_true_spatial_tamper_ratio = wm_tlt_embedder.eval_tamper_localization_and_detection(true_tamper_loc=true_tamper_loc_img, pred_tamper_loc=pred_tamper_loc_img)
         # in latent space
@@ -311,6 +361,7 @@ def main(args):
         latent_calc_true_spatial_tamper_ratios.append(latent_calc_true_spatial_tamper_ratio)
 
         # Tamper Localization Metrics
+        # 8) 计算并累计图像空间定位的多项指标（Accuracy/Precision/Specificity/Recall/AUC/IoU/Dice）
         aggregated_metrics = calc_metrics(true_tamper_loc_img, pred_tamper_loc_img)
         tl_metrics['Accuracy'] += aggregated_metrics['Accuracy']
         tl_metrics['Precision'] += aggregated_metrics['Precision']

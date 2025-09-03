@@ -34,6 +34,13 @@ def forward_ddim(x_t, alpha_t, alpha_tp1, eps_xt):
 
 
 class InversableStableDiffusionPipeline(ModifiedStableDiffusionPipeline):
+    """
+    可反演的 Stable Diffusion 管线：
+    - 复用生成管线能力，同时提供 forward_diffusion/backward_diffusion，
+      以 DDIM 形式将图像潜变量与噪声之间进行可逆映射；
+    - 主要用于将失真图像编码到潜空间后，进行“正向扩散”得到接近初始噪声的表示，
+      以便反解水印与定位模板。
+    """
     def __init__(self,
         vae,
         text_encoder,
@@ -94,6 +101,11 @@ class InversableStableDiffusionPipeline(ModifiedStableDiffusionPipeline):
     
     @torch.inference_mode()
     def get_image_latents(self, image, sample=True, rng_generator=None):
+        """
+        将图像编码到潜空间：
+        - VAE.encode 得到分布；sample=True 表示从分布采样，否则取均值（mode）。
+        - 返回尺度匹配的潜变量，用于反演与分析。
+        """
         encoding_dist = self.vae.encode(image).latent_dist
         if sample:
             encoding = encoding_dist.sample(generator=rng_generator)
@@ -118,7 +130,12 @@ class InversableStableDiffusionPipeline(ModifiedStableDiffusionPipeline):
         reverse_process: True = False,
         **kwargs,
     ):
-        """ Generate image from text prompt and latents
+        """
+        生成/反演主循环（DDIM）：
+        - reverse_process=False：从噪声到图像（生成/反推）；
+        - reverse_process=True：从图像噪声方向推进到更“随机”的潜表示（用于反解水印）。
+        - 可选 P2P（old/new embeddings）实现分步替换文本条件。
+        返回：更新后的潜变量。
         """
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`

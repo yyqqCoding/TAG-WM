@@ -4,7 +4,25 @@ import torch.nn as nn
 import math
 import torch.nn.functional as F
 
+"""
+DVRD（Dense Variation Region Detector）
+
+- 作用：对潜变量（VAE 编码空间，通道数=4）中的变化/篡改区域进行密集检测与细化。
+- 提供两种方式：
+  1) TrainableDVRD：使用 UNet 结构、可加载 checkpoint 进行端到端细化。
+  2) TrainfreeDVRD：无需训练，使用多尺度均值聚合 + 阈值化得到二值篡改图。
+
+输入输出：
+- 输入：形状 [B, 4, H, W] 的潜变量图或变化图（半精度/单精度）。
+- 输出：形状 [B, 4, H, W] 的细化结果（trainable），或 [B, 1, H, W] 的二值结果（trainfree）。
+"""
 def from_pretrained(checkpoint_path, train_size=512, torch_dtype=torch.float16, strict=True, device='cpu'):
+    """
+    加载可训练 DVRD 模型：
+    - 将 VAE 编码图下采样至 train_size/8（与潜空间尺度一致），再送入 UNet。
+    - checkpoint_path：包含 'model_state_dict' 的权重文件。
+    - 返回：已加载且 eval 的 TrainableDVRD 实例。
+    """
     train_size = train_size // 8  # downsample 8x for VAE encoded images
     model = TrainableDVRD(train_size=train_size, torch_dtype=torch_dtype, device=device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -13,7 +31,7 @@ def from_pretrained(checkpoint_path, train_size=512, torch_dtype=torch.float16, 
     return model
 
 class TrainableDVRD(nn.Module):
-    '''Dense Variation Region Detector'''
+    """可训练的密集变化区域检测器（UNet 细化）"""
     def __init__(self,
                  train_size=512,
                  torch_dtype=torch.float16,
@@ -28,6 +46,10 @@ class TrainableDVRD(nn.Module):
             self.unet = self.unet.half()
             
     def forward(self, x):
+        """
+        前向：可选缩放至训练尺寸 -> UNet -> 还原回原尺寸。
+        输入/输出形状均为 [B, 4, H, W]。
+        """
         if self.transform:
             h, w = x.size()[-2:]
             x = self.transform(x)
@@ -40,6 +62,7 @@ class TrainableDVRD(nn.Module):
         return x
 
 class UNet(nn.Module):
+    """标准 UNet：编码-解码并带跳连，用于潜空间细化。"""
     def __init__(self, in_channels, out_channels):
         super(UNet, self).__init__()
         
@@ -76,6 +99,9 @@ class UNet(nn.Module):
         self.final_conv = nn.Conv2d(64, out_channels, kernel_size=1)
     
     def forward(self, x):
+        """
+        UNet 编解码正向：保留多尺度信息并融合至输出。
+        """
         enc1 = self.encoder1(x)
         enc2 = self.encoder2(self.pool(enc1))
         enc3 = self.encoder3(self.pool(enc2))
@@ -101,6 +127,12 @@ class UNet(nn.Module):
         return self.final_conv(dec1)
 
 class TrainfreeDVRD(torch.nn.Module):
+    """
+    免训练 DVRD：
+    - 多尺度均值聚合（非重叠/可选重叠），再进行阈值化得到二值变化图；
+    - 自适应 kernel 大小：随图像尺寸放大，以覆盖更大感受野；
+    - overlapping=False 时使用 stride=k 的金字塔聚合以提速。
+    """
     def __init__(self, 
                  max_kernel_size = 8,
                  adaptive_max_kernel_size = True,
@@ -112,6 +144,11 @@ class TrainfreeDVRD(torch.nn.Module):
         self.overlapping = overlapping
         
     def forward(self, change_img: torch.Tensor, confidence = 0.5):
+        """
+        输入：change_img（B,1,H,W 或 1, H, W），值域建议为 [0,1]。
+        流程：多尺度平均 -> 聚合 -> 与 confidence 比较 -> 二值图。
+        返回：与输入同分辨率的二值掩码（int）。
+        """
         """
         input: 
             changed_img: [B, 1, H, W], img with changes

@@ -1,3 +1,11 @@
+"""
+Watermark and Tamper Localization Embedder (TAG-WM)
+
+- 版权水印（bit 串）通过打乱（shuffle）、流加密（ChaCha20）后，在潜空间按“截断正态分布分段采样”规则联合模板 TLT 进行采样嵌入。
+- TLT（Tamper Localization Template）采用对称/四分位阈值将 N(0,1) 分段，分别对应 (wm,tlt) 的四种组合，以保证可逆推与可定位性。
+- 反向流程：解打乱 -> 反采样 -> 解密 -> 基于重复的多数投票恢复 wm；对比反推 TLT 与原始 TLT 得到潜空间篡改位置，再由 DVRD 细化，最后可映射到图像空间进行可视化与评估。
+- 提供使用 DVRD（可训练/免训练）进行篡改定位细化的能力。
+"""
 import torch
 import torch.nn as nn
 from scipy.stats import norm, truncnorm
@@ -13,7 +21,15 @@ from DVRD import api as DVRD_API
 import time
 
 class WatermarkEmbedder(torch.nn.Module):
-    """dense watermark and dense fixed TLT embedder"""
+    """
+    密集版权水印 + 固定密集定位模板（TLT）嵌入器。
+
+    设计要点：
+    - 通过 `shuffle_random_seed` 实现固定可复现的打乱，提升鲁棒性与安全性。
+    - 使用 ChaCha20 流加密对重复展开的水印序列进行加密，避免明文模式泄漏。
+    - `tlt_intervals_num` 控制分段策略：3 表示以对称阈值 |z|>c 作为 tlt=1 区间；4 表示四分位切分（更细粒度）。
+    - `optimize_tamper_loc_method` 支持 'trainable'（基于 DVRD UNet）与 'trainfree'（多尺度均值池化+二值化）。
+    """
     def __init__(self, 
                  wm_len=256,
                  center_interval_ratio=0.5,
@@ -27,6 +43,18 @@ class WatermarkEmbedder(torch.nn.Module):
                  DVRD_train_size=512,
                  device='cuda',
                  ):
+        """
+        参数：
+        - wm_len: 水印比特长度（将在潜空间重复展开）
+        - center_interval_ratio: 分段中心区间占比，用于确定截断阈值（tlt=0/1 的分界）
+        - shuffle_random_seed: 打乱随机种子（None 则不打乱）
+        - encrypt_random_seed: ChaCha20 加密种子（None 则不加密）
+        - tlt_intervals_num: 3 或 4，控制截断分段策略
+        - fpr, user_number: 计算一比特/多比特阈值 tau 用于 TPR 估计（误报率控制）
+        - optimize_tamper_loc_method: 'trainable' | 'trainfree'，选择 DVRD 细化方式
+        - DVRD_checkpoint_path, DVRD_train_size: DVRD 相关加载参数
+        - device: 设备
+        """
         super(WatermarkEmbedder, self).__init__()
         # basic settings
         self.device = device
@@ -141,11 +169,14 @@ class WatermarkEmbedder(torch.nn.Module):
     #     return torch.from_numpy(z).half().to(self.device)
 
     def denseWMandDenseFixedTLTtruncSampling(self, wm, tlt):  
-        """  More effective 
-            When self.tlt_intervals_num == 3:
-                (wm, tlt) intervals: (0, 1), (0, 0), (1, 0), (1, 1) 
-            When self.tlt_intervals_num == 4:
-                (wm, tlt) intervals: (0, 0), (0, 1), (1, 0), (1, 1) 
+        """
+        基于截断正态分布的分段采样，将 (wm,tlt) 组合映射到 4 个截断区间上。
+
+        - 当 tlt_intervals_num == 3：使用对称阈值 ±c，将 |z|>c 视为 tlt=1；z>0 视为 wm=1。
+        - 当 tlt_intervals_num == 4：使用四分位阈值，将区间拆成四块，对应 (wm,tlt) 的四种情况。
+
+        返回：
+        - torch.HalfTensor，一维向量（潜变量展平后的噪声采样），稍后会被打乱与重塑形状。
         """
         if self.tlt_intervals_num == 3:
             z = np.zeros(wm.shape[0])
@@ -179,6 +210,13 @@ class WatermarkEmbedder(torch.nn.Module):
         return torch.from_numpy(z).half().to(self.device)
 
     def reverseTruncSampling(self, sampled_messege):
+        """
+        反采样：将采样得到的连续噪声还原为 (wm,tlt)。
+
+        步骤：
+        1) wm 通过 z>0 判定；
+        2) tlt 在 3-intervals 模式通过 |z|>c 判定；在 4-intervals 模式通过区间条件判定。
+        """
         # Tamper Localization Template: [0, 0, 0, 0, 1, 1, 1,....]
         if isinstance(sampled_messege, torch.Tensor):
             sampled_messege = sampled_messege.detach().cpu().numpy() 
@@ -208,6 +246,15 @@ class WatermarkEmbedder(torch.nn.Module):
         return reversed_wm, reversed_tlt    
 
     def embedding_wm_tlt(self, wm, tlt, latent_size):
+        """
+        将 wm 与 tlt 编码到潜变量噪声：
+        - 重复展开 wm 以覆盖潜空间长度；
+        - 流加密（可选）保护比特序列；
+        - 基于 (wm,tlt) 执行分段截断采样得到一维噪声；
+        - 打乱并重塑为 (1,C,H,W) 的潜变量形状。
+
+        返回：latent_noise, wm_repeat（torch.Tensor）
+        """
         # calculate latent length
         wm_len = wm.shape[0]
         latent_len = tlt.shape[0]
@@ -226,6 +273,11 @@ class WatermarkEmbedder(torch.nn.Module):
         return latent_noise, wm_repeat
 
     def deembedding_wm_tlt(self, reversed_latent: torch.Tensor):
+        """
+        反解码：
+        - 展平 -> 反打乱 -> 反采样得到 (wm_repeat_encrypt, reversed_tlt) -> 解密得到 wm_repeat
+        返回：wm_repeat (float Tensor 0/1)、reversed_tlt (np.ndarray 0/1)
+        """
         # flaten
         flat_reversed_latent = reversed_latent.view(-1)
         # de-shuffle
@@ -292,8 +344,13 @@ class WatermarkEmbedder(torch.nn.Module):
     #     return reversed_watermark
 
     def calc_watermark(self, wm_len, wm_repeat, pred_tamper_loc_latent=None, with_tamper_loc=True):
-        # if 'int' not in str(pred_tamper_loc_latent.dtype):
-        #     pred_tamper_loc_latent = (pred_tamper_loc_latent - torch.min(pred_tamper_loc_latent)) / (torch.max(pred_tamper_loc_latent) - torch.min(pred_tamper_loc_latent))
+        """
+        基于重复展开的 wm_repeat 恢复原始 wm：
+        - 将 DVRD/模板差异得到的“非篡改置信度”(1 - tamper) 反打乱后作为加权；
+        - 按 wm_len 分块进行加权投票，得到最终 bit 结果；
+        - 当 with_tamper_loc=False 或无定位信息时，退化为等权投票。
+        返回：reversed_watermark (int Tensor 0/1)
+        """
         latent_len = wm_repeat.size(0)   
         wm_repeat_times = latent_len // wm_len
         complete_wm_len = wm_len * wm_repeat_times
@@ -327,6 +384,10 @@ class WatermarkEmbedder(torch.nn.Module):
 
 
     def eval_watermark(self, wm, reversed_wm):
+        """
+        评估版权水印比特级准确率，并基于设定的阈值累计 TPR 统计。
+        返回：accuracy（float）
+        """
         acc = (reversed_wm == wm).float().mean().item()
         if acc >= self.tau_onebit:
             self.tp_onebit_count = self.tp_onebit_count+1
@@ -340,6 +401,12 @@ class WatermarkEmbedder(torch.nn.Module):
     
     ### Following Codes for Tamper Localization 
     def get_tamper_loc_latent(self, tlt, reversed_tlt, latent_size, tamper_confidence=0.5, optimize=True, return_initial_tl=False):
+        """
+        基于模板差异 (reversed_tlt != tlt) 得到初始潜空间篡改位置图，并可选择使用 DVRD 进行细化：
+        - trainable：UNet 结构（4 通道输入/输出），对潜空间 4 通道进行细化；
+        - trainfree：多尺度均值池化聚合，随后二值化，复制到 4 通道。
+        返回：细化后/原始的潜空间篡改图 (C=4,H,W)
+        """
         tamper_loc_latent = (reversed_tlt != tlt).astype(int)
         tamper_loc_latent = torch.from_numpy(tamper_loc_latent).to(self.device)
         tamper_loc_latent = self.shuffle(tamper_loc_latent)
@@ -365,6 +432,11 @@ class WatermarkEmbedder(torch.nn.Module):
             return refined_tamper_loc_latent
 
     def optimize_tamper_loc(self, tamper_loc_latent, tamper_confidence=0.5, method: Literal['TLR', 'HFCD'] = 'TLR'):
+        """
+        篡改定位细化：
+        - 'trainable'：调用 DVRD UNet 前向，半精度输入/输出；
+        - 'trainfree'：通道均值 -> DVRD.TrainfreeDVRD 进行多尺度聚合与阈值化 -> 复制到 4 通道。
+        """
         if method == 'trainable':
             return self.TLR_module(tamper_loc_latent.half().unsqueeze(0))[0]
             # return self.TLR_module(tamper_loc_latent.float().unsqueeze(0))[0]
@@ -375,6 +447,11 @@ class WatermarkEmbedder(torch.nn.Module):
             return tamper_loc_latent
 
     def trans_tamper_loc_img2latent(self, pipe, tamper_loc_img, binaryize_thre=0, value_continuous=False):
+        """
+        将图像空间的篡改掩码映射到潜空间：
+        - 使用 VAE 编码（不采样）得到潜变量；
+        - 可选地对潜变量二值化并复制到 4 通道。
+        """
         if tamper_loc_img.dim() == 3:
             tamper_loc_img = tamper_loc_img.unsqueeze(0)
         tamper_loc_img = tamper_loc_img.half()
@@ -387,6 +464,11 @@ class WatermarkEmbedder(torch.nn.Module):
         return tamper_loc_latent
     
     def trans_tamper_loc_latent2img(self, pipe, tamper_loc_latent, binaryize_thre=0, value_continuous=True):
+        """
+        将潜空间篡改图解码到图像空间，便于可视化与度量。
+        - 若 value_continuous=False，则先做值域映射与二值化。
+        返回：C=3 的图像掩码（0/1）
+        """
         if tamper_loc_latent.dim() == 3:
             tamper_loc_latent = tamper_loc_latent.unsqueeze(0)
             
@@ -404,6 +486,12 @@ class WatermarkEmbedder(torch.nn.Module):
         return (np.mean(tamper_local_loc, axis=0) >= 0.5).astype(int)
 
     def eval_tamper_localization_and_detection(self, pred_tamper_loc, true_tamper_loc=None):
+        """
+        评估定位水印性能：
+        - 图像/潜空间逐像素准确率（localize_acc）与空间聚合后的准确率（spatial_localize_acc）。
+        - 同时给出全局篡改比例的绝对误差与真实比例。
+        返回：(localize_acc, spatial_localize_acc, absolute_detect_error, calc_true_spatial_tamper_ratio)
+        """
         """
         tamper loc value:
             1. True or 1 -- tampered

@@ -1,3 +1,8 @@
+"""
+随机参数版 Logo 覆盖批处理：
+- 每张图像随机选择 (logo_putting_num, logo_ratio) 组合进行覆盖；
+- 将输出图像与掩码保存到指定目录，便于构建测试集/验证集。
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

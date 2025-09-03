@@ -1,3 +1,8 @@
+"""
+Logo 覆盖篡改：
+- 从数据集中随机选择若干 logo（及其前景掩码），随机缩放与摆放到背景图上；
+- 输出合成后的图像与对应的图像空间掩码（1 表示被 logo 覆盖的区域）。
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +15,7 @@ from torchvision import transforms
 
 
 def CheckPositions(check, positions):
+    """避免 logo 彼此过近/重叠：在既定边距下检查候选框是否与已放置框冲突。"""
     for i in positions:
         if (check[0]>=(i[0]+i[2]+20) or check[0]+check[2] <=i[0]-20) or (check[1]>=(i[1]+i[3]+20) or check[1]+check[3] <=i[1]-20):
                 continue
@@ -18,6 +24,7 @@ def CheckPositions(check, positions):
     return True
 
 def GetBoundingBox_Image(image, mask):
+    """依据前景掩码裁剪出 logo 的紧致外接框，返回对应的图像与掩码裁片。"""
     mask[mask>0]=1
     mask[mask<1]=0
     c_masks = mask.permute(1,0,2,3)
@@ -36,6 +43,12 @@ def GetBoundingBox_Image(image, mask):
     return input_img, cut_mask
 
 class Logo(nn.Module):
+    """
+    Logo 覆盖模块：
+    - get_logo_and_mask：随机读取若干 logo 与其掩码；
+    - logo_cover：在不重叠的随机位置按比例放置，生成合成图与最终掩码；
+    - forward：循环尝试直到放置成功（避免过多重叠导致失败）。
+    """
     def __init__(self, args):
         super(Logo, self).__init__()
         #
@@ -51,6 +64,7 @@ class Logo(nn.Module):
             self.im_msk_ids.append(file.split(".")[0])
 
     def get_logo_and_mask(self, logonum):
+        """随机采样 logonum 个 logo 与其二值掩码，并转换到张量形式。"""
         indices = np.random.randint(0, len(self.im_msk_ids), size=logonum)
         l = []
         for i in indices:
@@ -67,6 +81,12 @@ class Logo(nn.Module):
         return l
     
     def logo_cover(self, cover_img, logos:list, logo_ratio=0.2):
+        """
+        将若干 logo 放置到背景图上：
+        - 随机生成不重叠的放置框；
+        - 按目标大小插值 logo 与掩码，再进行对齐与填充；
+        - 聚合得到合成图与总掩码。
+        """
         # logos:[(logo,mask)]
         hb,wb = cover_img.shape[2:]
         postions = []
@@ -109,6 +129,9 @@ class Logo(nn.Module):
         return merge_img, final_masks, False
 
     def forward(self, image):
+        """
+        反复尝试放置，直到不重叠地完成覆盖；返回合成图与最终掩码。
+        """
         freezed = True
         while freezed:
             logos = self.get_logo_and_mask(self.logonum)
