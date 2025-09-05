@@ -182,14 +182,21 @@ def measure_similarity(images, prompt, model, clip_preprocess, tokenizer, device
     计算 CLIP 相似度（图像-文本平均相似度），用于质量/一致性度量。
     """
     with torch.no_grad():
-        img_batch = [clip_preprocess(i).unsqueeze(0) for i in images]
-        img_batch = torch.concatenate(img_batch).to(device)
-        image_features = model.encode_image(img_batch)
-
-        text = tokenizer([prompt]).to(device)
-        text_features = model.encode_text(text)
-
-        image_features /= image_features.norm(dim=-1, keepdim=True)
-        text_features /= text_features.norm(dim=-1, keepdim=True)
-
-        return (image_features @ text_features.T).mean(-1)
+        # 使用HuggingFace transformers的CLIP模型
+        # 截断文本以适应CLIP的77 token限制
+        inputs = clip_preprocess(text=[prompt], images=images, return_tensors="pt", padding=True, truncation=True, max_length=77)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        
+        outputs = model(**inputs)
+        
+        # 获取图像和文本特征
+        image_features = outputs.image_embeds
+        text_features = outputs.text_embeds
+        
+        # 归一化特征
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        
+        # 计算相似度
+        similarity = torch.cosine_similarity(image_features, text_features, dim=-1)
+        return similarity

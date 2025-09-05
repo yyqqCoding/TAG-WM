@@ -72,10 +72,12 @@ def main(args):
     # 可选：加载参考 CLIP 模型用于图文一致性评估
     #reference model for CLIP Score
     if args.reference_model is not None:
-        ref_model, _, ref_clip_preprocess = open_clip.create_model_and_transforms(args.reference_model,
-                                                                                  pretrained=args.reference_model_pretrain,
-                                                                                  device=device)
-        ref_tokenizer = open_clip.get_tokenizer(args.reference_model)
+        # 使用HuggingFace transformers加载CLIP模型，兼容你的模型格式
+        from transformers import CLIPModel, CLIPProcessor
+        clip_model_path = "/media/wang003/liyongqing/difusion/cache/models--laion--CLIP-ViT-g-14-laion2B-s12B-b42K/snapshots/4b0305adc6802b2632e11cbe6606a9bdd43d35c9"
+        ref_model = CLIPModel.from_pretrained(clip_model_path).to(device)
+        ref_clip_preprocess = CLIPProcessor.from_pretrained(clip_model_path)
+        ref_tokenizer = ref_clip_preprocess.tokenizer
 
     # 数据集与提示词入口（get_dataset 由外部 utils/数据集构造）
     # dataset

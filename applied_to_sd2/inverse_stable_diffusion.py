@@ -50,6 +50,7 @@ class InversableStableDiffusionPipeline(ModifiedStableDiffusionPipeline):
         safety_checker,
         feature_extractor,
         requires_safety_checker: bool = False,
+        image_encoder=None,
         
     ):
 
@@ -60,7 +61,8 @@ class InversableStableDiffusionPipeline(ModifiedStableDiffusionPipeline):
                 scheduler,
                 safety_checker,
                 feature_extractor,
-                requires_safety_checker)
+                requires_safety_checker,
+                image_encoder=image_encoder)
 
         self.forward_diffusion = partial(self.backward_diffusion, reverse_process=True)
         self.count = 0

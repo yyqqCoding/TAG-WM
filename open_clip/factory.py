@@ -84,11 +84,18 @@ def get_tokenizer(model_name):
 
 
 def load_state_dict(checkpoint_path: str, map_location='cpu'):
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
-    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-        state_dict = checkpoint['state_dict']
+    if checkpoint_path.endswith('.safetensors'):
+        try:
+            from safetensors.torch import load_file
+            state_dict = load_file(checkpoint_path)
+        except ImportError:
+            raise ImportError("safetensors is required to load .safetensors files. Install with: pip install safetensors")
     else:
-        state_dict = checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        else:
+            state_dict = checkpoint
     if next(iter(state_dict.items()))[0].startswith('module'):
         state_dict = {k[7:]: v for k, v in state_dict.items()}
     return state_dict
@@ -205,7 +212,7 @@ def create_model(
 
 
 
-                checkpoint_path = '/public/yangzijin/Diffusion/laion/laion2b_s12b_b42k/open_clip_pytorch_model.bin'
+                checkpoint_path = '/media/wang003/liyongqing/difusion/cache/models--laion--CLIP-ViT-g-14-laion2B-s12B-b42K/snapshots/4b0305adc6802b2632e11cbe6606a9bdd43d35c9/model.safetensors'
 
 
 
