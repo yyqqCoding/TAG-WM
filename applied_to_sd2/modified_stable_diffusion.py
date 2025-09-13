@@ -46,8 +46,7 @@ class ModifiedStableDiffusionPipeline(StableDiffusionPipeline):
                 scheduler,
                 safety_checker,
                 feature_extractor,
-                requires_safety_checker=requires_safety_checker,
-                image_encoder=image_encoder)
+                requires_safety_checker=requires_safety_checker)
 
     @torch.no_grad()
     def __call__(

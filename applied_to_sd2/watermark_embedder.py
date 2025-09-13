@@ -15,9 +15,16 @@ import numpy as np
 from Crypto.Cipher import ChaCha20
 # from Crypto.Random import get_random_bytes
 import math
+import os
 from bisect import bisect_left
 from typing import Literal
-from DVRD import api as DVRD_API
+try:
+    if os.environ.get('DISABLE_DVRD', '0') == '1':
+        raise ImportError("DVRD disabled for testing")
+    from DVRD import api as DVRD_API
+except ImportError:
+    DVRD_API = None
+    print("Warning: DVRD module not available, tamper localization refinement disabled")
 import time
 
 class WatermarkEmbedder(torch.nn.Module):
@@ -62,7 +69,7 @@ class WatermarkEmbedder(torch.nn.Module):
         # settings for tamper localization template embedding
         self.center_interval_ratio = center_interval_ratio
         self.optimize_tamper_loc_method = optimize_tamper_loc_method
-        if optimize_tamper_loc_method == 'trainable':
+        if optimize_tamper_loc_method == 'trainable' and DVRD_API is not None:
             self.TLR_module = DVRD_API.from_pretrained(checkpoint_path=DVRD_checkpoint_path, 
                                                       train_size=DVRD_train_size, 
                                                       torch_dtype=torch.float16, 
@@ -70,11 +77,15 @@ class WatermarkEmbedder(torch.nn.Module):
                                                       device=device)
 
             print("Tamper Localization Refinement method: Trainable")
-        elif optimize_tamper_loc_method == 'trainfree':
+        elif optimize_tamper_loc_method == 'trainfree' and DVRD_API is not None:
             self.TLR_module = DVRD_API.TrainfreeDVRD(max_kernel_size=None,
                                                           adaptive_max_kernel_size=True,
                                                           overlapping=False)
             print("Tamper Localization Refinement method: Train-free")
+        else:
+            self.TLR_module = None
+            if optimize_tamper_loc_method is not None:
+                print("Warning: DVRD not available, tamper localization refinement disabled")
 
         self.tlt_intervals_num = tlt_intervals_num
         self.abs_truncdot = np.abs(norm.ppf(0.5 - self.center_interval_ratio / 2))
@@ -178,6 +189,11 @@ class WatermarkEmbedder(torch.nn.Module):
         返回：
         - torch.HalfTensor，一维向量（潜变量展平后的噪声采样），稍后会被打乱与重塑形状。
         """
+        # 确保wm和tlt都是numpy数组
+        if isinstance(wm, torch.Tensor):
+            wm = wm.cpu().numpy()
+        if isinstance(tlt, torch.Tensor):
+            tlt = tlt.cpu().numpy()
         if self.tlt_intervals_num == 3:
             z = np.zeros(wm.shape[0])
             ppf = [-math.inf, -self.abs_truncdot, 0, self.abs_truncdot, math.inf]  # split 4 sampling range
@@ -263,7 +279,7 @@ class WatermarkEmbedder(torch.nn.Module):
         remain_wm_len = latent_len % wm_len
         wm_repeat = torch.concat([wm.repeat(wm_times), wm[:remain_wm_len]], dim=0)
         # encrypt
-        wm_repeat_encrypt = self.stream_key_encrypt(wm_repeat.cpu().numpy())
+        wm_repeat_encrypt = self.stream_key_encrypt(wm_repeat.cpu().numpy().astype(np.uint8))
         # sampling
         flat_latent = self.denseWMandDenseFixedTLTtruncSampling(wm_repeat_encrypt, tlt)
         # shuffle

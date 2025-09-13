@@ -10,7 +10,7 @@ from diffusers.pipelines.stable_diffusion.safety_checker import \
     StableDiffusionSafetyChecker
 from diffusers.schedulers import DDIMScheduler,PNDMScheduler, LMSDiscreteScheduler
 
-from applied_to_sd2.modified_stable_diffusion import ModifiedStableDiffusionPipeline
+from .modified_stable_diffusion import ModifiedStableDiffusionPipeline
 from torchvision.transforms import ToPILImage
 import matplotlib.pyplot as plt
 
@@ -61,8 +61,7 @@ class InversableStableDiffusionPipeline(ModifiedStableDiffusionPipeline):
                 scheduler,
                 safety_checker,
                 feature_extractor,
-                requires_safety_checker,
-                image_encoder=image_encoder)
+                requires_safety_checker)
 
         self.forward_diffusion = partial(self.backward_diffusion, reverse_process=True)
         self.count = 0

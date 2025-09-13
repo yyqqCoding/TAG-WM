@@ -74,9 +74,11 @@ def main(args):
     if args.reference_model is not None:
         # 使用HuggingFace transformers加载CLIP模型，兼容你的模型格式
         from transformers import CLIPModel, CLIPProcessor
-        clip_model_path = "/media/wang003/liyongqing/difusion/cache/models--laion--CLIP-ViT-g-14-laion2B-s12B-b42K/snapshots/4b0305adc6802b2632e11cbe6606a9bdd43d35c9"
-        ref_model = CLIPModel.from_pretrained(clip_model_path).to(device)
-        ref_clip_preprocess = CLIPProcessor.from_pretrained(clip_model_path)
+        # 直接使用Hugging Face模型ID，避免本地缓存不完整的问题
+        clip_model_id = "laion/CLIP-ViT-g-14-laion2B-s12B-b42K"
+
+        ref_model = CLIPModel.from_pretrained(clip_model_id).to(device)
+        ref_clip_preprocess = CLIPProcessor.from_pretrained(clip_model_id)
         ref_tokenizer = ref_clip_preprocess.tokenizer
 
     # 数据集与提示词入口（get_dataset 由外部 utils/数据集构造）
@@ -474,6 +476,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_inversion_steps', default=10, type=int)
     parser.add_argument('--dataset_path', default='./datasets/Gustavosta/Stable-Diffusion-Prompts')
     parser.add_argument('--model_path', default='/home/wang003/.cache/modelscope/hub/models/AI-ModelScope/stable-diffusion-2-1-base')
+    #parser.add_argument('--model_path', default='C:/Users/Administrator/.cache/huggingface/hub/models--stabilityai--stable-diffusion-2-1-base/snapshots/5ede9e4bf3e3fd1cb0ef2f7a3fff13ee514fdf06')
     parser.add_argument('--calc_wm_use_tamper_loc', default=False, type=bool)
 
     # for tamper localization
