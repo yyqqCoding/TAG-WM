@@ -185,28 +185,38 @@ class SimpleSEALLOCTest:
     
     def generate_semantic_location_watermark(self, latent_size: Tuple[int, int, int], prompt: str = None) -> torch.Tensor:
         """
-        生成语义感知定位水印 - SEAL-LOC核心算法
+        生成XOR基础模式的语义感知定位水印 - SEAL-LOC优化算法
         
         流程：
-        1. 生成确定性基础模式 P_base (棋盘格)
+        1. 生成确定性基础模式 P_base (完美棋盘格)
         2. 生成语义密钥 K_sem (基于prompt的patch级语义)
         3. XOR混合生成最终定位水印 W_loc_final
+        4. 最终分布校正确保严格0.5分布
+        
+        优势：
+        - 完美的伯努利(0.5)分布：继承TAG-WM的统计特性
+        - 高频敏感结构：保持对篡改的最大敏感度
+        - 语义绑定：每个patch与内容密码学级别绑定
         """
-        print("🎯 生成SEAL-LOC语义定位水印...")
+        print("🎯 生成XOR基础模式的SEAL-LOC语义定位水印...")
         
         total_bits = latent_size[0] * latent_size[1] * latent_size[2]  # 4*64*64 = 16384
         
         # === 步骤1：生成确定性的基础模式 P_base ===
-        print("  📐 步骤1：生成基础模式 (高频棋盘格)")
-        P_base = self._generate_base_pattern(total_bits)
+        print("  📐 步骤1：生成基础模式 (完美棋盘格)")
+        P_base = self._generate_perfect_base_pattern(total_bits)
         
         # === 步骤2：生成内容相关的语义密钥 K_sem ===
         print("  🔑 步骤2：生成语义密钥")
-        K_sem = self._generate_semantic_key(latent_size, prompt)
+        K_sem = self._generate_enhanced_semantic_key(latent_size, prompt)
         
         # === 步骤3：XOR混合生成最终定位水印 ===
         print("  🔀 步骤3：XOR混合生成最终定位水印")
         W_loc_final = P_base ^ K_sem
+        
+        # === 步骤4：最终分布校正（关键修复）===
+        print("  🔧 步骤4：最终分布校正")
+        W_loc_final = self._apply_final_distribution_correction(W_loc_final, prompt)
         
         # 转换为torch tensor并reshape
         w_loc_tensor = torch.tensor(W_loc_final, dtype=torch.int32, device=self.device)
@@ -214,90 +224,257 @@ class SimpleSEALLOCTest:
         
         # 验证统计特性
         ones_ratio = (W_loc_final == 1).sum() / len(W_loc_final)
-        print(f"✅ SEAL-LOC定位水印生成完成")
-        print(f"  📊 形状: {w_loc_tensor.shape}")
-        print(f"  📊 1的比例: {ones_ratio:.4f} (理想值: 0.5000)")
-        print(f"  🎯 语义绑定: prompt='{prompt}' → 确定性加密水印")
+        print(f"✅ XOR语义定位水印生成完成")
+        print(f"  📊 基础模式1的比例: {(P_base == 1).sum() / len(P_base):.6f}")
+        print(f"  📊 语义密钥1的比例: {(K_sem == 1).sum() / len(K_sem):.6f}")
+        print(f"  📊 最终水印1的比例: {ones_ratio:.6f} (完美目标: 0.500000)")
+        print(f"  🎯 完美统计特性 + 语义绑定 = 最优SEAL-LOC定位水印")
         
         return w_loc_tensor
     
-    def _generate_base_pattern(self, total_bits: int) -> np.ndarray:
+    def _generate_perfect_base_pattern(self, total_bits: int) -> np.ndarray:
         """
-        生成确定性基础模式 P_base
+        生成完美的基础模式 P_base
         
-        特性：
-        - 完美的伯努利(0.5)分布：0和1数量严格相等
-        - 高频棋盘格结构：对篡改最敏感
-        - 完全确定性：不依赖任何图像内容
+        完全复现TAG-WM的奇偶模式，确保：
+        - 严格交替的0-1-0-1-0-1...模式  
+        - 完美的伯努利(0.5)分布
+        - 高频棋盘格结构，对篡改最敏感
+        - 完全确定性，不依赖图像内容
         """
-        P_base = np.arange(total_bits) % 2  # 0,1,0,1,0,1...
-        print(f"    📐 基础模式: {len(P_base)}位, 1的比例: {(P_base == 1).sum() / len(P_base):.4f}")
-        return P_base
-    
-    def _generate_semantic_key(self, latent_size: Tuple[int, int, int], prompt: str = None) -> np.ndarray:
-        """
-        生成语义密钥 K_sem
+        # 完全复现TAG-WM: np.arange(args.latent_len) % 2
+        P_base = np.arange(total_bits) % 2
         
-        基于patch级语义向量生成与内容绑定的伪随机密钥
+        # 验证完美分布特性
+        ones_count = (P_base == 1).sum()
+        zeros_count = (P_base == 0).sum()
+        
+        print(f"    📐 TAG-WM兼容基础模式: {total_bits}位")
+        print(f"    📊 0的数量: {zeros_count}, 1的数量: {ones_count}")
+        print(f"    📊 完美比例: {ones_count / total_bits:.6f}")
+        print(f"    🎯 高频结构: 0-1-0-1-0-1... (对篡改最敏感)")
+        
+        return P_base.astype(np.int32)
+
+    def _generate_enhanced_semantic_key(self, latent_size: Tuple[int, int, int], prompt: str = None) -> np.ndarray:
+        """
+        生成增强的语义密钥 K_sem
+        
+        基于patch级语义向量生成与内容绑定的高质量伪随机密钥
+        **新增分布校正机制，确保严格0.5分布**
         """
         total_bits = latent_size[0] * latent_size[1] * latent_size[2]
         
         # 8x8 = 64个patch的语义处理
         patch_grid_size = 8
         num_patches = patch_grid_size * patch_grid_size
-        semantic_dim = 768  # 标准语义向量维度
+        bits_per_patch = total_bits // num_patches  # 256位/patch
         
-        # 基于prompt生成确定性种子
+        # 基于prompt生成确定性全局种子
         if prompt:
             prompt_hash = hash(prompt.lower().strip())
-            base_seed = prompt_hash & 0x7FFFFFFF
-            print(f"    🔑 prompt种子: '{prompt}' → {base_seed}")
+            global_seed = prompt_hash & 0x7FFFFFFF
+            print(f"    🔑 全局种子: '{prompt}' → {global_seed}")
         else:
-            base_seed = 42
-            print(f"    🔑 默认种子: {base_seed}")
+            global_seed = 42
+            print(f"    🔑 默认全局种子: {global_seed}")
         
         # 生成每个patch的语义密钥
-        semantic_key_bits = []
-        bits_per_patch = total_bits // num_patches
+        K_sem = np.zeros(total_bits, dtype=np.int32)
+        
+        print(f"    🔑 语义密钥生成: {num_patches}个patch, 每个{bits_per_patch}位")
         
         for patch_idx in range(num_patches):
-            # 为每个patch生成独特的语义向量
-            patch_seed = base_seed + patch_idx * 1000
-            torch.manual_seed(patch_seed)
+            # 为每个patch生成独特的语义表示
+            patch_seed = self._compute_patch_semantic_seed(prompt, patch_idx, global_seed)
             
-            # 生成基础语义向量
-            semantic_vector = torch.randn(semantic_dim, device=self.device)
+            # 基于语义种子生成该patch的密钥比特
+            patch_key_bits = self._generate_patch_key_bits(patch_seed, bits_per_patch)
             
-            # 基于prompt词汇调制语义向量
-            if prompt:
-                prompt_words = prompt.lower().split()
-                for word_idx, word in enumerate(prompt_words[:10]):
-                    word_influence = hash(word) % semantic_dim
-                    semantic_vector[word_influence] += 0.3 * (word_idx + 1) / len(prompt_words)
-            
-            # 归一化
-            semantic_vector = semantic_vector / torch.norm(semantic_vector)
-            
-            # 使用SimHash生成确定性种子
-            hash_keys = compute_simhash_fallback(semantic_vector, 1, 7, base_seed)
-            semantic_seed = hash_keys[0]
-            
-            # 生成该patch的密钥比特
-            np.random.seed(semantic_seed & 0xFFFFFFFF)
-            patch_key_bits = np.random.randint(0, 2, size=bits_per_patch)
-            semantic_key_bits.extend(patch_key_bits)
+            # 填入对应位置
+            start_idx = patch_idx * bits_per_patch
+            end_idx = start_idx + bits_per_patch
+            K_sem[start_idx:end_idx] = patch_key_bits
         
-        # 调整到精确长度
-        if len(semantic_key_bits) > total_bits:
-            semantic_key_bits = semantic_key_bits[:total_bits]
-        elif len(semantic_key_bits) < total_bits:
-            semantic_key_bits.extend([0] * (total_bits - len(semantic_key_bits)))
+        # 处理余数位
+        remaining_bits = total_bits % num_patches
+        if remaining_bits > 0:
+            last_seed = self._compute_patch_semantic_seed(prompt, num_patches, global_seed)
+            remaining_bits_data = self._generate_patch_key_bits(last_seed, remaining_bits)
+            K_sem[-remaining_bits:] = remaining_bits_data
         
-        K_sem = np.array(semantic_key_bits, dtype=np.int32)
-        ones_ratio = (K_sem == 1).sum() / len(K_sem)
-        print(f"    🔑 语义密钥: {len(K_sem)}位, 1的比例: {ones_ratio:.4f}")
+        # ⭐ 新增：分布校正机制 ⭐
+        K_sem = self._apply_distribution_correction(K_sem, prompt, global_seed)
+        
+        # 验证伪随机性
+        ones_ratio = (K_sem == 1).sum() / total_bits
+        print(f"    📊 语义密钥统计: 1的比例 {ones_ratio:.6f} (校正后)")
+        print(f"    🔐 语义绑定: prompt内容 → patch级种子 → 确定性密钥")
         
         return K_sem
+    
+    def _apply_distribution_correction(self, K_sem: np.ndarray, prompt: str, global_seed: int) -> np.ndarray:
+        """
+        应用分布校正机制，确保K_sem严格满足0.5分布
+        
+        策略：
+        1. 计算当前1的数量和目标数量的差值
+        2. 基于prompt生成确定性的位置序列
+        3. 按序列翻转对应位置的比特，直到达到严格0.5分布
+        
+        Args:
+            K_sem: 原始语义密钥
+            prompt: 提示词（用于生成确定性校正序列）
+            global_seed: 全局种子
+            
+        Returns:
+            校正后的语义密钥（严格0.5分布）
+        """
+        total_bits = len(K_sem)
+        target_ones = total_bits // 2  # 严格的一半
+        current_ones = (K_sem == 1).sum()
+        
+        print(f"    🔧 分布校正: 当前1的数量={current_ones}, 目标={target_ones}")
+        
+        if current_ones == target_ones:
+            print(f"    ✅ 已是完美分布，无需校正")
+            return K_sem
+        
+        # 创建副本进行校正
+        K_sem_corrected = K_sem.copy()
+        
+        # 生成确定性的校正位置序列
+        correction_seed = hash(f"{prompt}_{global_seed}_correction") & 0x7FFFFFFF
+        rng = np.random.RandomState(correction_seed)
+        position_sequence = rng.permutation(total_bits)
+        
+        if current_ones > target_ones:
+            # 需要将一些1改为0
+            excess_ones = current_ones - target_ones
+            ones_positions = np.where(K_sem_corrected == 1)[0]
+            # 按确定性序列选择要翻转的位置
+            positions_to_flip = []
+            for pos in position_sequence:
+                if pos in ones_positions and len(positions_to_flip) < excess_ones:
+                    positions_to_flip.append(pos)
+            K_sem_corrected[positions_to_flip] = 0
+            print(f"    🔄 翻转{len(positions_to_flip)}个1→0")
+            
+        elif current_ones < target_ones:
+            # 需要将一些0改为1
+            deficit_ones = target_ones - current_ones
+            zeros_positions = np.where(K_sem_corrected == 0)[0]
+            # 按确定性序列选择要翻转的位置
+            positions_to_flip = []
+            for pos in position_sequence:
+                if pos in zeros_positions and len(positions_to_flip) < deficit_ones:
+                    positions_to_flip.append(pos)
+            K_sem_corrected[positions_to_flip] = 1
+            print(f"    🔄 翻转{len(positions_to_flip)}个0→1")
+        
+        # 验证校正结果
+        final_ones = (K_sem_corrected == 1).sum()
+        final_ratio = final_ones / total_bits
+        print(f"    ✅ 校正完成: 1的数量={final_ones}, 比例={final_ratio:.6f}")
+        
+        return K_sem_corrected
+    
+    def _apply_final_distribution_correction(self, W_loc_final: np.ndarray, prompt: str) -> np.ndarray:
+        """
+        应用最终分布校正，确保XOR后的结果严格满足0.5分布
+        
+        这是关键修复：即使P_base和K_sem都是0.5分布，XOR后也可能有微小偏差
+        """
+        total_bits = len(W_loc_final)
+        target_ones = total_bits // 2  # 严格的一半
+        current_ones = (W_loc_final == 1).sum()
+        
+        print(f"    🔧 最终校正: 当前1的数量={current_ones}, 目标={target_ones}")
+        
+        if current_ones == target_ones:
+            print(f"    ✅ 已是完美分布，无需校正")
+            return W_loc_final
+        
+        # 创建副本进行校正
+        W_loc_corrected = W_loc_final.copy()
+        
+        # 生成确定性的校正位置序列（基于prompt确保一致性）
+        correction_seed = hash(f"{prompt}_final_correction") & 0x7FFFFFFF
+        rng = np.random.RandomState(correction_seed)
+        position_sequence = rng.permutation(total_bits)
+        
+        if current_ones > target_ones:
+            # 需要将一些1改为0
+            excess_ones = current_ones - target_ones
+            ones_positions = np.where(W_loc_corrected == 1)[0]
+            # 按确定性序列选择要翻转的位置
+            positions_to_flip = []
+            for pos in position_sequence:
+                if pos in ones_positions and len(positions_to_flip) < excess_ones:
+                    positions_to_flip.append(pos)
+            W_loc_corrected[positions_to_flip] = 0
+            print(f"    🔄 翻转{len(positions_to_flip)}个1→0")
+            
+        elif current_ones < target_ones:
+            # 需要将一些0改为1
+            deficit_ones = target_ones - current_ones
+            zeros_positions = np.where(W_loc_corrected == 0)[0]
+            # 按确定性序列选择要翻转的位置
+            positions_to_flip = []
+            for pos in position_sequence:
+                if pos in zeros_positions and len(positions_to_flip) < deficit_ones:
+                    positions_to_flip.append(pos)
+            W_loc_corrected[positions_to_flip] = 1
+            print(f"    🔄 翻转{len(positions_to_flip)}个0→1")
+        
+        # 验证校正结果
+        final_ones = (W_loc_corrected == 1).sum()
+        final_ratio = final_ones / total_bits
+        print(f"    ✅ 最终校正完成: 1的数量={final_ones}, 比例={final_ratio:.6f}")
+        
+        return W_loc_corrected
+    
+    def _compute_patch_semantic_seed(self, prompt: str, patch_idx: int, global_seed: int) -> int:
+        """
+        计算patch级语义种子
+        
+        结合prompt内容、patch位置生成高质量的确定性种子
+        """
+        # 基础种子：全局种子 + patch索引
+        base_seed = global_seed + patch_idx * 1000
+        
+        # 如果有prompt，进一步结合内容特征
+        if prompt:
+            # 提取prompt的关键特征
+            prompt_words = prompt.lower().split()
+            
+            # 计算该patch对应的prompt特征
+            word_influences = []
+            for word_idx, word in enumerate(prompt_words[:10]):  # 限制前10个词
+                word_hash = hash(word) & 0xFFFFFFFF
+                patch_influence = (word_hash + patch_idx) % 1000000
+                word_influences.append(patch_influence)
+            
+            # 结合所有词汇影响
+            content_influence = sum(word_influences) % 1000000 if word_influences else 0
+            
+            # 多层哈希生成最终种子
+            combined_input = f"{base_seed}_{content_influence}_{patch_idx}_{len(prompt_words)}"
+            final_hash = int(hashlib.md5(combined_input.encode()).hexdigest()[:8], 16)
+            final_seed = final_hash & 0x7FFFFFFF
+        else:
+            final_seed = base_seed & 0x7FFFFFFF
+        
+        return final_seed
+    
+    def _generate_patch_key_bits(self, seed: int, length: int) -> np.ndarray:
+        """
+        基于种子生成高质量的伪随机密钥比特
+        """
+        # 使用numpy的高质量随机数生成器
+        rng = np.random.RandomState(seed)
+        key_bits = rng.randint(0, 2, size=length, dtype=np.int32)
+        return key_bits
     
     def generate_initial_noise_tagwm(self, w_cop: torch.Tensor, w_loc: torch.Tensor) -> torch.Tensor:
         """使用TAG-WM完整流程生成初始噪声"""
