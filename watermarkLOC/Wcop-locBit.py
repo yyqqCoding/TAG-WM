@@ -117,41 +117,59 @@ def main():
 	parser.add_argument('--w_cop_path', type=str, default='')
 	parser.add_argument('--w_loc_path', type=str, default='')
 	parser.add_argument('--z_tw_path', type=str, default='')
+	parser.add_argument('--output_root', type=str, default='')
+	parser.add_argument('--hash', type=str, default='')
 	parser.add_argument('--blind', action='store_true', default=True)
 	args = parser.parse_args()
 
 	device = args.device if torch.cuda.is_available() and args.device.startswith('cuda') else 'cpu'
-	ph = md5_16(args.prompt) if args.prompt.strip() != '' else ''
 
-	# 推断默认路径
-	base_dir = os.path.dirname(__file__)
-	default_image_path = os.path.join(base_dir, 'output', 'stage6', f'image_{ph}.png') if ph else ''
-	default_wcop_path = os.path.join(base_dir, 'output', 'stage5', f'w_cop_{ph}.pt') if ph else ''
-	default_wloc_path = os.path.join(base_dir, 'output', 'stage4', f'w_loc_s_{ph}.pt') if ph else ''
-	default_ztw_path = os.path.join(base_dir, 'output', 'stage6', f'z_tw_{ph}.pt') if ph else ''
+	# 组装评测用例：
+	cases = []
+	# 情况A：用户显式提供单样本路径
+	if args.image_path and args.w_cop_path and args.w_loc_path:
+		cases.append({
+			"hash": "manual",
+			"image_path": args.image_path,
+			"w_cop_path": args.w_cop_path,
+			"w_loc_path": args.w_loc_path,
+			"z_tw_path": args.z_tw_path or ''
+		})
+	else:
+		# 情况B：自动遍历 output/<hash>/
+		base_dir = os.path.dirname(__file__)
+		output_root = args.output_root or os.path.join(base_dir, 'output')
+		assert os.path.isdir(output_root), f"输出根目录不存在: {output_root}"
+		cand_hashes = []
+		if args.hash.strip():
+			cand_hashes = [args.hash.strip()]
+		else:
+			for name in os.listdir(output_root):
+				full = os.path.join(output_root, name)
+				if os.path.isdir(full):
+					cand_hashes.append(name)
+		for h in sorted(cand_hashes):
+			h_dir = os.path.join(output_root, h)
+			img_p = os.path.join(h_dir, f"image_{h}.png")
+			wcop_p = os.path.join(h_dir, f"w_cop_{h}.pt")
+			wloc_p = os.path.join(h_dir, f"w_loc_s_{h}.pt")
+			ztw_p = os.path.join(h_dir, f"z_tw_{h}.pt")
+			if os.path.exists(img_p) and os.path.exists(wcop_p) and os.path.exists(wloc_p):
+				cases.append({
+					"hash": h,
+					"image_path": img_p,
+					"w_cop_path": wcop_p,
+					"w_loc_path": wloc_p,
+					"z_tw_path": ztw_p if os.path.exists(ztw_p) else ''
+				})
+			else:
+				print(f"[Skip] 缺少必要文件，已跳过: {h_dir}")
 
-	image_path = args.image_path or default_image_path
-	w_cop_path = args.w_cop_path or default_wcop_path
-	w_loc_path = args.w_loc_path or default_wloc_path
-	z_tw_path = args.z_tw_path  # 可选，仅用于L2对比
+	assert len(cases) > 0, "未找到任何可评测样本（请确认 output/<hash>/ 目录结构正确，或显式提供 --image_path/--w_cop_path/--w_loc_path）"
 
-	# 盲提取时若未提供原始Wcop/Wloc路径，无法做准确率对比
-	if args.blind and (not w_cop_path or not w_loc_path):
-		raise ValueError("盲提取模式下无法根据prompt推断文件名，请通过 --w_cop_path 与 --w_loc_path 显式提供嵌入期保存的Wcop与Wloc路径")
-
-	# 加载管线（本地）
+	# 加载管线（本地，一次）
 	pipe = load_pipe(args.model_id, device)
-
-	# 读取带水印图片
-	assert os.path.exists(image_path), f"水印图不存在: {image_path}"
-	watermarked_img = Image.open(image_path).convert('RGB')
-	img_tensor = preprocess_pil_to_tensor(watermarked_img, args.height, args.width, pipe.text_encoder.dtype, device)
-
-	# DDIM反演至噪声
-	latents_T = ddim_invert_to_noise(pipe, img_tensor, args.num_inference_steps, args.guidance_scale, args.prompt, args.blind)
-	print(f"[Invert] 反演得到噪声形状: {tuple(latents_T.shape)}")
-
-	# 反解Wcop与Wloc
+	# 构造嵌入器（一次）
 	embedder = WatermarkEmbedder(
 		wm_len=args.wm_len,
 		center_interval_ratio=0.5,
@@ -160,32 +178,64 @@ def main():
 		tlt_intervals_num=args.tlt_intervals_num,
 		device=device,
 	)
-	wm_repeat, reversed_tlt = embedder.deembedding_wm_tlt(latents_T)
-	reversed_wm_bits = embedder.calc_watermark(args.wm_len, wm_repeat, with_tamper_loc=False)
 
-	# 加载嵌入期保存的Wcop/Wloc
-	assert os.path.exists(w_cop_path), f"W_cop文件不存在: {w_cop_path}"
-	assert os.path.exists(w_loc_path), f"W_loc^S文件不存在: {w_loc_path}"
-	orig_wcop = torch.load(w_cop_path, map_location='cpu')  # (wm_len,)
-	orig_wloc = torch.load(w_loc_path, map_location='cpu')  # (C,H,W)
+	acc_wcop_list = []
+	acc_wloc_list = []
+	l2_list = []
 
-	# 计算bit准确率
-	rev_wm_np = reversed_wm_bits.detach().cpu().numpy().astype(np.uint8)
-	orig_wm_np = orig_wcop.detach().cpu().numpy().astype(np.uint8)
-	acc_wcop = compute_bit_accuracy(rev_wm_np, orig_wm_np)
+	for case in cases:
+		hash_code = case['hash']
+		image_path = case['image_path']
+		w_cop_path = case['w_cop_path']
+		w_loc_path = case['w_loc_path']
+		z_tw_path = case['z_tw_path']
 
-	rev_wloc_np = reversed_tlt.astype(np.uint8).reshape(-1)
-	orig_wloc_np = orig_wloc.detach().cpu().numpy().astype(np.uint8).reshape(-1)
-	acc_wloc = compute_bit_accuracy(rev_wloc_np, orig_wloc_np)
+		assert os.path.exists(image_path), f"水印图不存在: {image_path}"
+		watermarked_img = Image.open(image_path).convert('RGB')
+		img_tensor = preprocess_pil_to_tensor(watermarked_img, args.height, args.width, pipe.text_encoder.dtype, device)
 
-	print(f"W_cop bit accuracy: {acc_wcop:.6f}")
-	print(f"W_loc^S bit accuracy: {acc_wloc:.6f}")
+		# 反演
+		latents_T = ddim_invert_to_noise(pipe, img_tensor, args.num_inference_steps, args.guidance_scale, args.prompt, args.blind)
+		print(f"[Invert:{hash_code}] 反演噪声形状: {tuple(latents_T.shape)}")
 
-	# 可选：对比反演噪声与嵌入期保存的Z_T^w的L2
-	if z_tw_path and os.path.exists(z_tw_path):
-		saved_ztw = torch.load(z_tw_path, map_location=device)
-		l2 = torch.norm(saved_ztw - latents_T).item()
-		print(f"Z_T^w inversion L2 distance: {l2:.6f}")
+		# 反解
+		wm_repeat, reversed_tlt = embedder.deembedding_wm_tlt(latents_T)
+		reversed_wm_bits = embedder.calc_watermark(args.wm_len, wm_repeat, with_tamper_loc=False)
+
+		# 加载GT
+		assert os.path.exists(w_cop_path), f"W_cop文件不存在: {w_cop_path}"
+		assert os.path.exists(w_loc_path), f"W_loc^S文件不存在: {w_loc_path}"
+		orig_wcop = torch.load(w_cop_path, map_location='cpu')
+		orig_wloc = torch.load(w_loc_path, map_location='cpu')
+
+		rev_wm_np = reversed_wm_bits.detach().cpu().numpy().astype(np.uint8)
+		orig_wm_np = orig_wcop.detach().cpu().numpy().astype(np.uint8)
+		acc_wcop = compute_bit_accuracy(rev_wm_np, orig_wm_np)
+
+		rev_wloc_np = reversed_tlt.astype(np.uint8).reshape(-1)
+		orig_wloc_np = orig_wloc.detach().cpu().numpy().astype(np.uint8).reshape(-1)
+		acc_wloc = compute_bit_accuracy(rev_wloc_np, orig_wloc_np)
+
+		acc_wcop_list.append(acc_wcop)
+		acc_wloc_list.append(acc_wloc)
+		print(f"[{hash_code}] W_cop: {acc_wcop:.6f} | W_loc^S: {acc_wloc:.6f}")
+
+		if z_tw_path:
+			try:
+				saved_ztw = torch.load(z_tw_path, map_location=device)
+				l2 = torch.norm(saved_ztw - latents_T).item()
+				l2_list.append(l2)
+				print(f"[{hash_code}] Z_T^w L2: {l2:.6f}")
+			except Exception as _e:
+				print(f"[{hash_code}] Z_T^w L2计算失败: {_e}")
+
+	# 汇总
+	if acc_wcop_list:
+		print(f"Summary - W_cop avg: {np.mean(acc_wcop_list):.6f} over {len(acc_wcop_list)} samples")
+	if acc_wloc_list:
+		print(f"Summary - W_loc^S avg: {np.mean(acc_wloc_list):.6f} over {len(acc_wloc_list)} samples")
+	if l2_list:
+		print(f"Summary - Z_T^w L2 avg: {np.mean(l2_list):.6f} over {len(l2_list)} samples")
 
 
 if __name__ == '__main__':
